@@ -151,9 +151,16 @@
 
   <dialog id="historyDialog" class="card-dialog">
     <h3>Past sessions</h3>
-    <p class="muted">Replay a council exactly as it happened.</p>
+    <p class="muted">Saved on this device. Replay a council exactly as it happened.</p>
     <ul class="history" id="historyList"></ul>
-    <form method="dialog"><button class="ghost">Close</button></form>
+    <div class="history-toolbar">
+      <button type="button" class="ghost" id="exportHistoryBtn" title="Export past sessions to JSON">Export JSON</button>
+      <label class="ghost" title="Import past sessions from JSON" style="display:inline-flex;align-items:center;cursor:pointer;">
+        Import JSON
+        <input type="file" id="importHistoryInput" accept=".json" hidden>
+      </label>
+      <form method="dialog" style="display:inline;"><button class="ghost">Close</button></form>
+    </div>
   </dialog>
 
   <div class="toast" id="toast" hidden></div>

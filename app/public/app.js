@@ -376,6 +376,12 @@ function bindUI() {
     if (e.target.closest("[data-pdf]")) savePdf(e.target.closest("[data-pdf]"));
   });
   $("#historyBtn").addEventListener("click", openHistory);
+  $("#exportHistoryBtn")?.addEventListener("click", exportAllSessions);
+  $("#importHistoryInput")?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (file) importSessionsFile(file);
+    e.target.value = "";
+  });
   $("#newBtn").addEventListener("click", reset);
   $("#verdictSheet").addEventListener("click", (e) => { if (e.target.id === "verdictSheet" || e.target.closest("[data-close]")) $("#verdictSheet").hidden = true; });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#verdictSheet").hidden = true; });
@@ -403,7 +409,25 @@ function bindUI() {
 // whatever is queued instantly; new events after that animate again.
 const player = {
   q: [], busy: false, epoch: 0, speed: 1, fast: false, timers: new Set(),
-  push(ev) { this.q.push(ev); this.info(); this.pump(); },
+  push(ev) {
+    if (!state.replaying && state.session) {
+      if (!state.sessionEvents) state.sessionEvents = [];
+      state.sessionEvents.push(ev);
+      if (ev.type === "verdict") {
+        saveLocalSession({
+          id: state.session,
+          title: state.setup?.title || state.session,
+          mode: state.setup?.mode || "council",
+          status: "done",
+          events: [...state.sessionEvents],
+          timestamp: Date.now(),
+        });
+      }
+    }
+    this.q.push(ev);
+    this.info();
+    this.pump();
+  },
   async pump() {
     if (this.busy) return;
     this.busy = true;
@@ -459,6 +483,7 @@ function reset() {
 function begin(id) {
   reset();
   state.session = id;
+  state.sessionEvents = [];
   $("#composer").hidden = true;
   $("#waiting").hidden = true;
   $("#newBtn").hidden = false;
@@ -883,20 +908,147 @@ function onVerdict(ev) {
   f.innerHTML = `<b>Verdict: ${esc(v.label)}.</b> ${esc(firstSentences(clean(v.call), 160))}`;
   feedAppend(f);
   setTimeout(() => { if (state.verdict === ev) $("#verdictSheet").hidden = false; }, 1600);
+  if (!state.replaying && state.session) {
+    saveLocalSession({
+      id: state.session,
+      title: state.setup?.title || v.label || state.session,
+      mode: state.setup?.mode || "council",
+      status: "done",
+      events: [...(state.sessionEvents || [])],
+      timestamp: Date.now(),
+    });
+  }
 }
 
-// ------------------------------------------------------------- history + replay
+// ------------------------------------------------------------- local persistence & history
+const STORAGE_KEY = "roast_room_sessions_v1";
+
+function getLocalSessions() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.warn("localStorage read failed", e);
+    return [];
+  }
+}
+
+function saveLocalSession(sessionData) {
+  try {
+    if (!sessionData || !sessionData.id) return;
+    const list = getLocalSessions().filter((s) => s.id !== sessionData.id);
+    list.unshift(sessionData);
+    const trimmed = list.slice(0, 60); // store up to 60 councils
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+  } catch (e) {
+    console.warn("localStorage save failed", e);
+  }
+}
+
+function getLocalSession(id) {
+  return getLocalSessions().find((s) => s.id === id) || null;
+}
+
+function deleteLocalSession(id) {
+  try {
+    const list = getLocalSessions().filter((s) => s.id !== id);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+    toast("Council removed from this device.");
+  } catch (e) {
+    console.warn("localStorage delete failed", e);
+  }
+}
+
+function exportAllSessions() {
+  const list = getLocalSessions();
+  if (!list.length) return toast("No saved councils on this device to export.");
+  const blob = new Blob([JSON.stringify(list, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `roast-room-councils-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast("Exported sessions to JSON file.");
+}
+
+function importSessionsFile(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      const incoming = Array.isArray(data) ? data : [data];
+      let count = 0;
+      for (const s of incoming) {
+        if (s && s.id && s.events) {
+          saveLocalSession(s);
+          count++;
+        }
+      }
+      toast(`Imported ${count} past session(s) successfully.`);
+      openHistory();
+    } catch {
+      toast("Invalid JSON session backup file.");
+    }
+  };
+  reader.readAsText(file);
+}
+
 async function openHistory() {
-  const { sessions } = await fetch("/api/sessions").then((x) => x.json());
+  let serverSessions = [];
+  try {
+    const res = await fetch("/api/sessions");
+    if (res.ok) {
+      const data = await res.json();
+      serverSessions = data.sessions || [];
+    }
+  } catch {}
+
+  const localSessions = getLocalSessions();
+  const map = new Map();
+  // Merge: local sessions first, then server sessions
+  for (const s of localSessions) map.set(s.id, s);
+  for (const s of serverSessions) {
+    if (!map.has(s.id)) map.set(s.id, s);
+  }
+  const sessions = [...map.values()].sort((a, b) => (a.id < b.id ? 1 : -1));
+
   $("#historyList").innerHTML = sessions.length
-    ? sessions.map((s) => `<li><button data-id="${esc(s.id)}"><b>${esc(s.title)}</b><small>${esc(s.id.slice(0, 10))} · ${esc(s.mode)} · ${esc(s.status)}</small></button>${s.status === "done" ? `<button class="pdf" type="button" data-pdf="${esc(s.id)}" title="Download the verdict as a PDF">PDF</button>` : ""}</li>`).join("")
-    : '<li class="muted">No sessions yet. Convene the council once and it shows up here.</li>';
-  $$("#historyList button[data-id]").forEach((b) => b.addEventListener("click", () => { $("#historyDialog").close(); replay(b.dataset.id); }));
+    ? sessions.map((s) => `
+      <li>
+        <button data-id="${esc(s.id)}" title="Replay this council">
+          <b>${esc(s.title || "Council Session")}</b>
+          <small>${esc((s.id || "").slice(0, 10))} · ${esc(s.mode || "council")} · ${esc(s.status || "done")}</small>
+        </button>
+        <div class="hist-actions">
+          ${s.status === "done" ? `<button class="pdf" type="button" data-pdf="${esc(s.id)}" title="Download PDF">PDF</button>` : ""}
+          <button class="ghost hist-del" type="button" data-del="${esc(s.id)}" title="Delete from this device">×</button>
+        </div>
+      </li>`).join("")
+    : '<li class="muted">No sessions yet on this device. Convene a council and it shows up here.</li>';
+
+  $$("#historyList button[data-id]").forEach((b) => b.addEventListener("click", () => {
+    $("#historyDialog").close();
+    replay(b.dataset.id);
+  }));
+
+  $$("#historyList button[data-del]").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteLocalSession(b.dataset.del);
+    openHistory();
+  }));
+
   $("#historyDialog").showModal();
 }
 
 async function replay(id) {
-  const j = await fetch(`/api/sessions/${encodeURIComponent(id)}`).then((x) => x.json());
+  let j = getLocalSession(id);
+  if (!j || !j.events?.length) {
+    try {
+      j = await fetch(`/api/sessions/${encodeURIComponent(id)}`).then((x) => x.json());
+    } catch {}
+  }
+  if (!j || !j.events?.length) return toast("Could not find session data to replay.");
   begin(id);
   state.replaying = true;
   for (const ev of j.events) {
@@ -999,9 +1151,14 @@ async function savePdf(btn) {
   try {
     let setup = state.setup, verdict = state.verdict;
     if (id) { // a past session from the history list
-      const j = await fetch("/api/sessions/" + encodeURIComponent(id)).then((x) => x.json());
-      setup = j.events.find((e) => e.type === "setup");
-      verdict = [...j.events].reverse().find((e) => e.type === "verdict");
+      let j = getLocalSession(id);
+      if (!j || !j.events) {
+        j = await fetch("/api/sessions/" + encodeURIComponent(id)).then((x) => x.json()).catch(() => null);
+      }
+      if (j && j.events) {
+        setup = j.events.find((e) => e.type === "setup");
+        verdict = [...j.events].reverse().find((e) => e.type === "verdict");
+      }
     }
     if (!setup || !verdict) throw new Error("This council has no verdict yet.");
     await downloadVerdictPdf({ setup, verdict, byKey: state.byKey, id: id || state.session });
