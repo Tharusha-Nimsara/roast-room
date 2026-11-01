@@ -1,10 +1,16 @@
+// Support local root CAs (Windows certificate store / corporate proxies)
+if (!process.execArgv.includes("--use-system-ca") && !process.env.NODE_EXTRA_CA_CERTS) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+}
+
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { APP_ROOT, env } from "./lib/env.mjs";
 import { loadRoster, BOARD } from "./lib/seats.mjs";
-import { startCouncil, getSession, subscribe, listSaved, loadSaved, MODELS } from "./lib/council.mjs";
-import { usage } from "./lib/anthropic.mjs";
+import { startCouncil, getSession, subscribe, listSaved, loadSaved, MODELS, AVAILABLE_MODELS } from "./lib/council.mjs";
+import { usage as anthropicUsage } from "./lib/anthropic.mjs";
+import { usage as geminiUsage, getKeys as getGeminiKeys } from "./lib/gemini.mjs";
 import * as watch from "./lib/watch.mjs";
 
 const PORT = Number(process.env.PORT) || 4730;
@@ -37,15 +43,42 @@ const server = http.createServer(async (req, res) => {
       // portraits: which of the four mouth shapes exist for each seat (a seat with none gets a drawn bust)
       const frame = (key, sh) => ["webp", "png", "jpg"].map((x) => `${key}-${sh}.${x}`).find((f) => fs.existsSync(path.join(PUBLIC, "portraits", f)));
       const seats = loadRoster().map((s) => ({ ...s, portraits: Object.fromEntries(["base", "open", "mid", "blink"].map((sh) => [sh, frame(s.key, sh)]).filter(([, f]) => f).map(([sh, f]) => [sh, `/portraits/${f}`])) }));
-      return send(res, 200, { seats, board: BOARD, models: MODELS, runner: RUNNER, hasKey: Boolean(env("ANTHROPIC_API_KEY")) });
+      const geminiKeys = getGeminiKeys();
+      const hasKey = {
+        gemini: geminiKeys.length > 0,
+        anthropic: Boolean(env("ANTHROPIC_API_KEY")),
+      };
+      return send(res, 200, {
+        seats,
+        board: BOARD,
+        models: { provider: MODELS.provider, seat: MODELS.seat, chair: MODELS.chair },
+        availableModels: AVAILABLE_MODELS,
+        runner: RUNNER,
+        hasKey,
+        geminiKeyCount: geminiKeys.length,
+      });
     }
-    if (p === "/api/usage") return send(res, 200, usage);
+    if (p === "/api/usage") {
+      return send(res, 200, {
+        input: (anthropicUsage.input || 0) + (geminiUsage.input || 0),
+        output: (anthropicUsage.output || 0) + (geminiUsage.output || 0),
+        calls: (anthropicUsage.calls || 0) + (geminiUsage.calls || 0),
+        gemini: geminiUsage,
+        anthropic: anthropicUsage,
+      });
+    }
     if (p === "/api/council" && req.method === "POST") {
       if (RUNNER !== "api") return send(res, 403, { error: "This room is a viewer. Run /roast-room in Claude Code, or set COUNCIL_RUNNER=api in .env." });
       if (running && getSession(running)?.status === "running") return send(res, 409, { error: "A council is already in session. Wait for its verdict." });
-      const { prompt, mode } = await readJson(req);
+      const { prompt, mode, provider, seatModel, chairModel } = await readJson(req);
       if (!prompt || prompt.trim().length < 10) return send(res, 400, { error: "Give the council a real decision (at least a sentence)." });
-      const s = startCouncil(prompt.trim().slice(0, 4000), mode === "quick" ? "quick" : "full");
+      const modelOverrides = {};
+      if (provider && (provider === "gemini" || provider === "anthropic")) {
+        modelOverrides.provider = provider;
+      }
+      if (seatModel) modelOverrides.seat = seatModel;
+      if (chairModel) modelOverrides.chair = chairModel;
+      const s = startCouncil(prompt.trim().slice(0, 4000), mode === "quick" ? "quick" : "full", modelOverrides);
       running = s.id;
       return send(res, 200, { id: s.id });
     }
@@ -66,8 +99,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (p.startsWith("/api/sessions/")) {
       const id = decodeURIComponent(p.split("/").pop());
+      const mem = getSession(id);
       const x = watch.getLive(id);
-      const j = loadSaved(id) || (x && { id, title: x.title, mode: x.mode, status: x.status, events: x.events });
+      const j = loadSaved(id) || (mem && { id, title: mem.state?.title || mem.prompt?.slice(0, 50), mode: mem.mode, status: mem.status, events: mem.events }) || (x && { id, title: x.title, mode: x.mode, status: x.status, events: x.events });
       return j ? send(res, 200, j) : send(res, 404, { error: "not found" });
     }
     // static

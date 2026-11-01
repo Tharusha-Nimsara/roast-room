@@ -13,17 +13,25 @@ export const AGENTS_DIR = path.join(REPO_ROOT, ".claude", "agents");
 export const SESSIONS_DIR = KIT ? path.join(REPO_ROOT, "sessions") : path.join(REPO_ROOT, "projects", "founder-council", "sessions");
 
 let cache = null;
+let lastMtime = 0;
+
 export function env(key) {
   if (process.env[key]) return process.env[key];
-  if (!cache) {
-    cache = {};
-    const p = path.join(REPO_ROOT, ".env");
-    if (fs.existsSync(p)) {
-      for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
-        const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
-        if (m && !(m[1] in cache)) cache[m[1]] = m[2].trim();
+  const p = path.join(REPO_ROOT, ".env");
+  if (fs.existsSync(p)) {
+    try {
+      const stat = fs.statSync(p);
+      if (!cache || stat.mtimeMs !== lastMtime) {
+        cache = {};
+        lastMtime = stat.mtimeMs;
+        for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
+          const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+          if (m && !(m[1] in cache)) cache[m[1]] = m[2].trim();
+        }
       }
+    } catch {
+      // ignore concurrent read errors
     }
   }
-  return cache[key] || "";
+  return cache?.[key] || "";
 }

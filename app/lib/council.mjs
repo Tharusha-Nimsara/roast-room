@@ -1,13 +1,59 @@
 import fs from "node:fs";
 import path from "node:path";
 import { SEATS, BOARD, byKey, systemFor, parseCard, checkQuotes, defaultBoard, loadRoster } from "./seats.mjs";
-import * as ai from "./anthropic.mjs";
+import * as anthropic from "./anthropic.mjs";
+import * as gemini from "./gemini.mjs";
 import { S } from "./anthropic.mjs";
-import { SESSIONS_DIR } from "./env.mjs";
+import { SESSIONS_DIR, env } from "./env.mjs";
 
+/** Return the right AI client module for a given provider string. */
+const clientFor = (provider) => provider === "gemini" ? gemini : anthropic;
+
+// Per-provider default models
+export const DEFAULT_MODELS = {
+  anthropic: { seat: "claude-sonnet-5-5",       chair: "claude-opus-5-5"        },
+  gemini:    { seat: "gemini-3.5-flash-lite",   chair: "gemini-3.5-flash-lite"  },
+};
+
+// All models the UI can offer, keyed by provider
+export const AVAILABLE_MODELS = {
+  anthropic: [
+    { id: "claude-sonnet-5-5",        label: "Claude Sonnet 5.5 (balanced)" },
+    { id: "claude-opus-5-5",          label: "Claude Opus 5.5 (most powerful)" },
+    { id: "claude-haiku-5-5",         label: "Claude Haiku 5.5 (fastest)" },
+    { id: "claude-3-7-sonnet-latest", label: "Claude 3.7 Sonnet" },
+    { id: "claude-3-5-haiku-latest",  label: "Claude 3.5 Haiku" },
+  ],
+  gemini: [
+    { id: "gemini-3.5-flash-lite",       label: "Gemini 3.5 Flash-Lite (fast & stable - recommended)" },
+    { id: "gemini-3-flash-preview",      label: "Gemini 3.0 Flash Preview" },
+    { id: "gemini-3.1-flash-lite-preview", label: "Gemini 3.1 Flash-Lite Preview" },
+    { id: "gemini-3.5-flash",            label: "Gemini 3.5 Flash" },
+    { id: "gemini-2.5-flash",            label: "Gemini 2.5 Flash" },
+  ],
+};
+
+/**
+ * Resolve effective models + provider for a session.
+ * Reads AI_PROVIDER / SEAT_MODEL / CHAIR_MODEL from .env lazily, then applies
+ * any per-request overrides supplied by the caller.
+ */
+export function resolveModels(overrides = {}) {
+  const provider = overrides.provider || process.env.AI_PROVIDER || env("AI_PROVIDER") || "gemini";
+  const defs = DEFAULT_MODELS[provider] || DEFAULT_MODELS.gemini;
+  const validIds = (AVAILABLE_MODELS[provider] || []).map((m) => m.id);
+  const seat  = (validIds.includes(overrides.seat)  ? overrides.seat  : null)
+             || process.env.SEAT_MODEL  || env("SEAT_MODEL")  || defs.seat;
+  const chair = (validIds.includes(overrides.chair) ? overrides.chair : null)
+             || process.env.CHAIR_MODEL || env("CHAIR_MODEL") || defs.chair;
+  return { provider, seat, chair, client: clientFor(provider) };
+}
+
+// Static snapshot used by /api/seats — resolved lazily on first request
 export const MODELS = {
-  seat: process.env.SEAT_MODEL || "claude-sonnet-5-5",
-  chair: process.env.CHAIR_MODEL || "claude-opus-5-5",
+  get seat()     { return resolveModels().seat; },
+  get chair()    { return resolveModels().chair; },
+  get provider() { return resolveModels().provider; },
 };
 
 // The board comes from the roster: the saved default board, or every seat it lists.
@@ -184,7 +230,7 @@ function bandFor(score) {
 }
 
 // ---------------------------------------------------------------- chair calls
-async function chairSetup(st) {
+async function chairSetup(st, models) {
   const schema = S.obj({
     title: S.str,
     decision: S.str,
@@ -195,8 +241,8 @@ async function chairSetup(st) {
     quick_seats: S.arr(S.enum(...st.board)),
     seats: S.arr(S.enum(...st.board)),
   });
-  return ai.json({
-    model: MODELS.chair, system: chairSystem(st), schema, maxTokens: 3000,
+  return models.client.json({
+    model: models.chair, system: chairSystem(st), schema, maxTokens: 3000,
     prompt: `A founder brought this to the council:
 
 """${st.prompt}"""
@@ -209,19 +255,19 @@ Set up the room.
 - assumptions: any number or fact you had to assume to make the brief usable, each one line. Keep it to what matters.
 - weights: one entry for every seat, weight 1 to 3 (3 = the decision lives in this pillar, 2 = materially affected, 1 = touched at the edges). Exactly one or two seats at 3. Reason in one line.
 - quick_seats: the four seats for a quick council: the two highest-weight seats, the seat that guards the downside (money, capital, or risk) if it is not already in, and the seat most likely to disagree with the others.
-- seats: ${st.pick ? "the board for a full council, five to seven seats: every seat at weight 2 or 3, the seat that guards the downside, and the seat most likely to disagree. Leave out seats at weight 1 unless they are the downside or dissent seat." : "every seat (the board is fixed)."}`,
+- seats: ${st.pick ? "the board for a full council, five to seven seats: every seat at weight 2 or 3, the seat that guards the downside, and the seat most likely to disagree. Leave out seats at weight 1 unless they are the downside or dissent seat." : "every seat (the board is fixed.)."}`,
   });
 }
 
-async function chairCruxes(st) {
+async function chairCruxes(st, models) {
   const schema = S.obj({
     cruxes: S.arr(S.obj({ question: S.str, sides: S.arr(S.obj({ position: S.str, seats: S.arr(S.enum(...st.board)) })) })),
     unanimous: S.bool,
     note: S.str,
     pressure: S.arr(S.obj({ seat: S.enum(...st.board), ask: S.str })),
   });
-  return ai.json({
-    model: MODELS.chair, system: chairSystem(st), schema, maxTokens: 3000,
+  return models.client.json({
+    model: models.chair, system: chairSystem(st), schema, maxTokens: 3000,
     prompt: `${briefBlock(st)}
 
 ROUND 1 CARDS
@@ -234,7 +280,7 @@ pressure: for each seat that holds a minority view, or that the unanimity check 
   });
 }
 
-async function chairDraft(st, interim) {
+async function chairDraft(st, interim, models) {
   const schema = S.obj({
     option: S.str,
     label: S.enum("GO", "GO WITH CONDITIONS", "RESHAPE", "WAIT", "DON'T DO IT"),
@@ -244,8 +290,8 @@ async function chairDraft(st, interim) {
     cheapest_test: S.str,
     kill_criteria: S.str,
   });
-  return ai.json({
-    model: MODELS.chair, system: chairSystem(st), schema, maxTokens: 3000,
+  return models.client.json({
+    model: models.chair, system: chairSystem(st), schema, maxTokens: 3000,
     prompt: `${briefBlock(st)}
 
 ROUND 2 CARDS (the debate)
@@ -258,7 +304,7 @@ Write the draft resolution. Weigh arguments, not headcount: one seat with a deci
   });
 }
 
-async function chairVerdict(st, finalScores, recommended) {
+async function chairVerdict(st, finalScores, recommended, models) {
   const lastRound = st.rounds.at(-1);
   const schema = S.obj({
     label: S.enum("GO", "GO WITH CONDITIONS", "RESHAPE", "WAIT", "DON'T DO IT"),
@@ -274,8 +320,8 @@ async function chairVerdict(st, finalScores, recommended) {
     kill_criteria: S.str,
     revisit: S.str,
   });
-  return ai.json({
-    model: MODELS.chair, system: chairSystem(st), schema, maxTokens: 5000,
+  return models.client.json({
+    model: models.chair, system: chairSystem(st), schema, maxTokens: 5000,
     prompt: `${briefBlock(st)}
 
 CRUXES: ${JSON.stringify(st.cruxes)}
@@ -301,13 +347,13 @@ Write the verdict for the founder.
 }
 
 // ---------------------------------------------------------------- the run
-async function runSeat(s, st, round, key, prompt) {
+async function runSeat(s, st, round, key, prompt, models) {
   const seat = byKey[key];
   emit(s, "seat_start", { round, seat: key });
   let text = "";
   try {
-    text = await ai.stream({
-      model: MODELS.seat, system: systemFor(key), maxTokens: 1400,
+    text = await models.client.stream({
+      model: models.seat, system: systemFor(key), maxTokens: 1400,
       messages: [{ role: "user", content: prompt }],
       onText: (d) => { text += d; emit(s, "delta", { round, seat: key, text: d }); },
     });
@@ -321,18 +367,21 @@ async function runSeat(s, st, round, key, prompt) {
   emit(s, "seat_done", { round, seat: key, text, parsed, quotes, name: seat.name });
 }
 
-async function roundAll(s, st, round, promptFn) {
+async function roundAll(s, st, round, promptFn, models) {
   emit(s, "round_start", { round });
   // stagger starts slightly so speech bubbles open in a ripple around the table
-  await Promise.all(st.seats.map((k, i) => new Promise((r) => setTimeout(r, i * 350)).then(() => runSeat(s, st, round, k, promptFn(st, byKey[k])))));
+  const delay = models.provider === "gemini" ? 750 : 350;
+  await Promise.all(st.seats.map((k, i) => new Promise((r) => setTimeout(r, i * delay)).then(() => runSeat(s, st, round, k, promptFn(st, byKey[k]), models))));
   const scores = optionScores(st, round);
   st.scores[round] = scores;
   emit(s, "round_done", { round, scores });
 }
 
-export function startCouncil(prompt, mode = "full") {
+export function startCouncil(prompt, mode = "full", modelOverrides = {}) {
   const s = newSession(prompt, mode);
-  run(s).catch((e) => {
+  const models = resolveModels(modelOverrides);
+  s.models = { provider: models.provider, seat: models.seat, chair: models.chair };
+  run(s, models).catch((e) => {
     s.status = "error";
     emit(s, "error", { error: String(e.message || e) });
     for (const res of s.subs) res.write(`data: ${JSON.stringify({ type: "end" })}\n\n`);
@@ -341,14 +390,14 @@ export function startCouncil(prompt, mode = "full") {
   return s;
 }
 
-async function run(s) {
+async function run(s, models) {
   // "default" seats the saved default board; "ask" and "auto" let the Chair pick from every seat
   // (there is no one to ask in the room, so "ask" picks like "auto" here)
   loadRoster();
   const pick = BOARD.mode !== "default";
   const st = (s.state = { prompt: s.prompt, mode: s.mode, pick, board: pick ? SEATS.map((x) => x.key) : defaultBoard(), cards: { 1: {}, 2: {}, 3: {} }, scores: {}, rounds: [] });
   emit(s, "phase", { phase: "setup", label: "The Chair is reading your question" });
-  const setup = await chairSetup(st);
+  const setup = await chairSetup(st, models);
   Object.assign(st, {
     title: setup.title, decision: setup.decision, brief: setup.brief,
     options: setup.options, assumptions: setup.assumptions,
@@ -362,21 +411,21 @@ async function run(s) {
     for (const k of full) if (st.seats.length < 4 && !st.seats.includes(k)) st.seats.push(k);
   }
   st.board = st.seats.slice(); // later Chair calls only see the seats at the table
-  emit(s, "setup", { title: st.title, decision: st.decision, brief: st.brief, options: st.options, assumptions: st.assumptions, weights: st.weights, seats: st.seats, mode: s.mode });
+  emit(s, "setup", { title: st.title, decision: st.decision, brief: st.brief, options: st.options, assumptions: st.assumptions, weights: st.weights, seats: st.seats, mode: s.mode, models });
 
   emit(s, "phase", { phase: "round1", label: "Round 1: opening positions" });
   st.rounds.push(1);
-  await roundAll(s, st, 1, round1Prompt);
+  await roundAll(s, st, 1, round1Prompt, models);
 
   emit(s, "phase", { phase: "cruxes", label: "The Chair is finding the fault lines" });
-  const cx = await chairCruxes(st);
+  const cx = await chairCruxes(st, models);
   st.cruxes = cx.cruxes;
   st.pressure = Object.fromEntries((cx.pressure || []).map((p) => [p.seat, p.ask]));
   emit(s, "cruxes", { cruxes: cx.cruxes, unanimous: cx.unanimous, note: cx.note, pressure: st.pressure });
 
   emit(s, "phase", { phase: "round2", label: "Round 2: the debate" });
   st.rounds.push(2);
-  await roundAll(s, st, 2, round2Prompt);
+  await roundAll(s, st, 2, round2Prompt, models);
 
   const s2 = st.scores[2];
   const top2 = Object.entries(s2).sort((a, b) => (b[1].score ?? 0) - (a[1].score ?? 0))[0][0];
@@ -387,11 +436,11 @@ async function run(s) {
 
   if (!skip3) {
     emit(s, "phase", { phase: "draft", label: "The Chair is drafting a resolution" });
-    st.draft = await chairDraft(st, s2);
+    st.draft = await chairDraft(st, s2, models);
     emit(s, "draft", { draft: st.draft });
     emit(s, "phase", { phase: "round3", label: "Round 3: the vote" });
     st.rounds.push(3);
-    await roundAll(s, st, 3, round3Prompt);
+    await roundAll(s, st, 3, round3Prompt, models);
   } else {
     emit(s, "phase", { phase: "skip3", label: `Quick mode: spread ${spread} and no ruin risk, so the vote round is skipped` });
   }
@@ -399,11 +448,11 @@ async function run(s) {
   const { last, finalScores, recommended, spreadF, confidence, support, votes } = finalNumbers(st);
 
   emit(s, "phase", { phase: "verdict", label: "The Chair is writing the verdict" });
-  const v = await chairVerdict(st, finalScores, recommended);
+  const v = await chairVerdict(st, finalScores, recommended, models);
   st.verdict = { ...v, recommended, scores: finalScores, spread: spreadF, confidence, support, votes, disclaimer: DISCLAIMER };
   emit(s, "verdict", { verdict: st.verdict, seats: verdictSeats(st, last) });
   s.status = "done";
-  emit(s, "usage", { usage: ai.usage });
+  emit(s, "usage", { usage: models.client.usage });
   for (const res of s.subs) res.write(`data: ${JSON.stringify({ type: "end" })}\n\n`);
   save(s);
 }

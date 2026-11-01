@@ -101,7 +101,15 @@ const state = {
 async function boot() {
   const r = await refreshSeats();
   state.runner = r.runner;
-  if (r.runner === "api" && !r.hasKey) toast("No ANTHROPIC_API_KEY found in .env. Add it and restart the server.");
+  state.hasKey = r.hasKey;
+  if (r.runner === "api") {
+    const curProv = state.models?.provider || "gemini";
+    const keyOk = typeof r.hasKey === "object" ? r.hasKey[curProv] : r.hasKey;
+    if (!keyOk) {
+      const keyName = curProv === "gemini" ? "GEMINI_API_KEY" : "ANTHROPIC_API_KEY";
+      toast(`No ${keyName} found in .env. Add it and restart the server.`);
+    }
+  }
   renderSeats(state.board);
   renderSamples();
   bindUI();
@@ -125,8 +133,60 @@ async function refreshSeats() {
   state.byKey = Object.fromEntries(r.seats.map((s) => [s.key, s]));
   state.board = (r.board?.default || []).filter((k) => state.byKey[k]);
   if (!state.board.length) state.board = r.seats.slice(0, 7).map((s) => s.key);
+  state.models = r.models;
+  state.availableModels = r.availableModels || {};
+  state.hasKey = r.hasKey;
+  state.geminiKeyCount = r.geminiKeyCount || 1;
   bustCache.clear();
+  populateModelSelects(r.models, r.availableModels || {});
   return r;
+}
+
+function populateModelSelects(current, availableMap) {
+  const provSel = $("#providerSelect");
+  const seatSel = $("#seatModelSelect");
+  const chairSel = $("#chairModelSelect");
+  if (!seatSel || !chairSel) return;
+
+  const currentProvider = provSel?.value || current?.provider || "gemini";
+  if (provSel && current?.provider && !provSel.dataset.initialized) {
+    provSel.value = current.provider;
+    provSel.dataset.initialized = "true";
+  }
+
+  const badge = $("#keyRotationBadge");
+  if (badge) {
+    if (currentProvider === "gemini" && state.geminiKeyCount > 1) {
+      badge.textContent = `${state.geminiKeyCount} keys rotating`;
+      badge.title = `${state.geminiKeyCount} Gemini API keys loaded with round-robin rotation & 429 rate limit failover`;
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+    }
+  }
+
+  const list = Array.isArray(availableMap)
+    ? availableMap
+    : (availableMap?.[provSel?.value || currentProvider] || []);
+
+  [seatSel, chairSel].forEach((sel) => { sel.innerHTML = ""; });
+  for (const m of list) {
+    const opt1 = document.createElement("option");
+    opt1.value = m.id; opt1.textContent = m.label;
+    if (m.id === current?.seat) opt1.selected = true;
+    seatSel.appendChild(opt1);
+
+    const opt2 = document.createElement("option");
+    opt2.value = m.id; opt2.textContent = m.label;
+    if (m.id === current?.chair) opt2.selected = true;
+    chairSel.appendChild(opt2);
+  }
+
+  if (seatSel.options.length && !seatSel.value) seatSel.selectedIndex = 0;
+  if (chairSel.options.length && !chairSel.value) chairSel.selectedIndex = 0;
+
+  const wrap = $("#modelSelectors");
+  if (wrap) wrap.hidden = !list.length;
 }
 
 // a council started in Claude Code shows up here on its own
@@ -217,10 +277,20 @@ function layoutStage() {
     stage.style.paddingTop = `${H}px`; // the scene sits on top; captions flow below it
   } else {
     stage.style.paddingTop = "";
-    // the captions start below the lowest nameplate they could collide with
-    const inner = (n > 2 ? state.table.slice(1, -1) : state.table).map((k) => $(`#plate-${k}`));
-    const top = Math.max(...inner.map((p) => p.offsetTop + p.offsetHeight / 2)) + H * 0.035;
-    Object.assign(c.style, { left: `${W * 0.2}px`, width: `${W * 0.6}px`, top: `${top}px`, height: `${H - top - H * 0.09}px` });
+    // The center content (composer, captions, crux) sits inside the open table horseshoe.
+    // It must strictly clear all inner nameplates above it without overlapping side seats.
+    const inner = (n > 2 ? state.table.slice(1, -1) : state.table).map((k) => $(`#plate-${k}`)).filter(Boolean);
+    const top = inner.length
+      ? Math.max(...inner.map((p) => p.offsetTop + p.offsetHeight / 2)) + 14
+      : Math.round(H * 0.52);
+    const centerW = Math.min(620, Math.round(W * 0.65));
+    const centerL = Math.round((W - centerW) / 2);
+    Object.assign(c.style, {
+      left: `${centerL}px`,
+      width: `${centerW}px`,
+      top: `${top}px`,
+      height: `${Math.max(180, H - top - 12)}px`,
+    });
   }
   const sp = state.speaking ? state.geo[state.speaking] : null;
   if (sp) moveSpot(state.speaking);
@@ -236,13 +306,23 @@ function moveSpot(key) {
 }
 
 function bindUI() {
+  $("#providerSelect")?.addEventListener("change", () => {
+    populateModelSelects(state.models, state.availableModels);
+  });
   $("#composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const prompt = $("#prompt").value.trim();
     if (prompt.length < 10) return toast("Give the council a real decision, at least a sentence.");
     const mode = $('input[name="mode"]:checked').value;
     $("#convene").disabled = true;
-    const r = await fetch("/api/council", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt, mode }) });
+    const provider = $("#providerSelect")?.value || undefined;
+    const seatModel = $("#seatModelSelect")?.value || undefined;
+    const chairModel = $("#chairModelSelect")?.value || undefined;
+    const r = await fetch("/api/council", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt, mode, provider, seatModel, chairModel }),
+    });
     const j = await r.json();
     $("#convene").disabled = false;
     if (!r.ok) return toast(j.error || "Could not start the council.");

@@ -62,14 +62,33 @@
 
           <form class="composer" id="composer" hidden>
             <h2 data-type>What decision do you need help with?</h2>
-            <textarea id="prompt" rows="3" placeholder="Give them the decision, your options, a few numbers (revenue, cash, team), and which way you're leaning." required minlength="10"></textarea>
+            <textarea id="prompt" rows="2" placeholder="Give them the decision, your options, a few numbers (revenue, cash, team), and which way you're leaning." required minlength="10"></textarea>
             <div class="samples" id="samples"></div>
-            <div class="composer-row">
-              <div class="mode" role="radiogroup" aria-label="Council size">
-                <label><input type="radio" name="mode" value="full" checked><span>Full council <small>7 seats, 3 rounds</small></span></label>
-                <label><input type="radio" name="mode" value="quick"><span>Quick <small>4 seats, 2 rounds</small></span></label>
+            <div class="composer-controls">
+              <div class="composer-action-row">
+                <div class="mode" role="radiogroup" aria-label="Council size">
+                  <label><input type="radio" name="mode" value="full" checked><span>Full council <small>7 seats &middot; 3 rnds</small></span></label>
+                  <label><input type="radio" name="mode" value="quick"><span>Quick <small>4 seats &middot; 2 rnds</small></span></label>
+                </div>
+                <button class="convene" type="submit" id="convene">Convene the council &#10140;</button>
               </div>
-              <button class="convene" type="submit" id="convene">Convene the council</button>
+              <div class="model-selectors" id="modelSelectors">
+                <label class="model-label">
+                  <span class="model-title">Provider<span id="keyRotationBadge" class="key-badge" hidden></span></span>
+                  <select id="providerSelect" title="AI Provider (Gemini or Anthropic)">
+                    <option value="gemini">Google Gemini</option>
+                    <option value="anthropic">Anthropic Claude</option>
+                  </select>
+                </label>
+                <label class="model-label">
+                  <span class="model-title">Advisors</span>
+                  <select id="seatModelSelect" title="Model used for each advisor seat"></select>
+                </label>
+                <label class="model-label">
+                  <span class="model-title">Chair</span>
+                  <select id="chairModelSelect" title="Model used for the Chair (orchestration + verdict)"></select>
+                </label>
+              </div>
             </div>
           </form>
 
