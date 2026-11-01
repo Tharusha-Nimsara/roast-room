@@ -318,15 +318,47 @@ function bindUI() {
     const provider = $("#providerSelect")?.value || undefined;
     const seatModel = $("#seatModelSelect")?.value || undefined;
     const chairModel = $("#chairModelSelect")?.value || undefined;
-    const r = await fetch("/api/council", {
+    const r = await fetch("/api/council?stream=true", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "accept": "text/event-stream, application/json" },
       body: JSON.stringify({ prompt, mode, provider, seatModel, chairModel }),
     });
-    const j = await r.json();
     $("#convene").disabled = false;
-    if (!r.ok) return toast(j.error || "Could not start the council.");
-    attach(j.id);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: "Could not start the council." }));
+      return toast(err.error || "Could not start the council.");
+    }
+
+    if (r.headers.get("content-type")?.includes("text/event-stream") && r.body) {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop();
+        for (const part of parts) {
+          for (const line of part.split("\n")) {
+            if (line.startsWith("data: ")) {
+              try {
+                const ev = JSON.parse(line.slice(6));
+                if (ev.type === "init") { begin(ev.id); continue; }
+                if (ev.type === "end") { refreshUsage(); continue; }
+                if (ev.type === "delta") continue;
+                if (ev.type === "usage") { refreshUsage(); continue; }
+                if (ev.type === "seat_error") { toast(`${state.byKey[ev.seat]?.short || "Seat"} hit an error: ${ev.error}`); continue; }
+                player.push(ev);
+              } catch {}
+            }
+          }
+        }
+      }
+    } else {
+      const j = await r.json();
+      attach(j.id);
+    }
   });
   const openFrom = (e) => { const b = e.target.closest("[data-seat]"); if (b) openCard(b.dataset.seat); };
   $("#seats").addEventListener("click", openFrom);

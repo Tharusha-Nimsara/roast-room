@@ -381,7 +381,7 @@ export function startCouncil(prompt, mode = "full", modelOverrides = {}) {
   const s = newSession(prompt, mode);
   const models = resolveModels(modelOverrides);
   s.models = { provider: models.provider, seat: models.seat, chair: models.chair };
-  run(s, models).catch((e) => {
+  s.done = run(s, models).catch((e) => {
     s.status = "error";
     emit(s, "error", { error: String(e.message || e) });
     for (const res of s.subs) res.write(`data: ${JSON.stringify({ type: "end" })}\n\n`);

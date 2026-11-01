@@ -10,7 +10,9 @@ export const REPO_ROOT = KIT ? path.resolve(APP_ROOT, "..") : path.resolve(APP_R
 export const BRAINS_DIR = path.join(REPO_ROOT, ".claude", "skills", "roast-room", "brains");
 export const ROSTER = path.join(REPO_ROOT, ".claude", "skills", "roast-room", "roster.json");
 export const AGENTS_DIR = path.join(REPO_ROOT, ".claude", "agents");
-export const SESSIONS_DIR = KIT ? path.join(REPO_ROOT, "sessions") : path.join(REPO_ROOT, "projects", "founder-council", "sessions");
+export const SESSIONS_DIR = process.env.VERCEL
+  ? path.join("/tmp", "sessions")
+  : (KIT ? path.join(REPO_ROOT, "sessions") : path.join(REPO_ROOT, "projects", "founder-council", "sessions"));
 
 let cache = null;
 let lastMtime = 0;

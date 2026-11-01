@@ -5,6 +5,7 @@
   "description": "The Roast Room: eleven AI advisors built from the public work of Bezos, Paul Graham, Hormozi, Gary Vaynerchuk, Dan Martell, Gino Wickman, Buffett, Naval Ravikant, Codie Sanchez, Leila Hormozi, and Sara Blakely (plus any you add with /newroaster) debate your decision in Claude Code, live around a table.",
   "type": "module",
   "scripts": {
+    "build": "node app/scripts/build.mjs",
     "start": "node --use-system-ca app/server.mjs",
     "smoke": "node app/scripts/smoke.mjs"
   },

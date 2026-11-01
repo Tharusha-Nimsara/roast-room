@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "buildCommand": "node app/scripts/build.mjs",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60,
+      "includeFiles": ".claude/**, app/**"
+    }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/index.mjs" },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/api/index.mjs" }
+  ]
+}

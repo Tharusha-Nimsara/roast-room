@@ -14,14 +14,23 @@ import { usage as geminiUsage, getKeys as getGeminiKeys } from "./lib/gemini.mjs
 import * as watch from "./lib/watch.mjs";
 
 const PORT = Number(process.env.PORT) || 4730;
-const PUBLIC = path.join(APP_ROOT, "public");
+const PUBLIC = fs.existsSync(path.join(APP_ROOT, "public"))
+  ? path.join(APP_ROOT, "public")
+  : path.join(process.cwd(), "public");
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".ico": "image/x-icon", ".json": "application/json", ".ttf": "font/ttf", ".txt": "text/plain; charset=utf-8" };
 
 let running = null; // one council at a time (API runner)
 
 // "viewer" (default): the room plays councils that /roast-room runs in Claude Code.
-// "api": the room can also run councils itself on ANTHROPIC_API_KEY (COUNCIL_RUNNER=api in .env).
-const RUNNER = (process.env.COUNCIL_RUNNER || env("COUNCIL_RUNNER") || "viewer").toLowerCase() === "api" ? "api" : "viewer";
+// "api": the room can also run councils itself on ANTHROPIC_API_KEY / GEMINI_API_KEY.
+const RUNNER = (
+  process.env.COUNCIL_RUNNER ||
+  env("COUNCIL_RUNNER") ||
+  (process.env.VERCEL ? "api" : "viewer")
+).toLowerCase() === "api" || Boolean(process.env.GEMINI_API_KEY || env("GEMINI_API_KEY"))
+  ? "api"
+  : "viewer";
+
 watch.startWatching();
 
 function send(res, code, body, type = "application/json") {
@@ -35,8 +44,8 @@ async function readJson(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+export async function handleRequest(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const p = url.pathname;
   try {
     if (p === "/api/seats") {
@@ -46,7 +55,7 @@ const server = http.createServer(async (req, res) => {
       const geminiKeys = getGeminiKeys();
       const hasKey = {
         gemini: geminiKeys.length > 0,
-        anthropic: Boolean(env("ANTHROPIC_API_KEY")),
+        anthropic: Boolean(env("ANTHROPIC_API_KEY") || process.env.ANTHROPIC_API_KEY),
       };
       return send(res, 200, {
         seats,
@@ -80,6 +89,21 @@ const server = http.createServer(async (req, res) => {
       if (chairModel) modelOverrides.chair = chairModel;
       const s = startCouncil(prompt.trim().slice(0, 4000), mode === "quick" ? "quick" : "full", modelOverrides);
       running = s.id;
+
+      // Direct SSE streaming: prevents Vercel serverless containers from freezing, and delivers real-time events
+      if (url.searchParams.get("stream") === "true" || req.headers.accept?.includes("text/event-stream")) {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-store, no-transform",
+          "connection": "keep-alive",
+        });
+        res.write(`data: ${JSON.stringify({ type: "init", id: s.id })}\n\n`);
+        subscribe(s, res);
+        await s.done;
+        res.end();
+        return;
+      }
+
       return send(res, 200, { id: s.id });
     }
     if (p.startsWith("/api/stream/")) {
@@ -112,6 +136,12 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     send(res, 500, { error: String(e.message || e) });
   }
-});
+}
 
-server.listen(PORT, "127.0.0.1", () => console.log(`Roast Room on http://localhost:${PORT} (${RUNNER === "api" ? "viewer + API runner" : "viewer: run /roast-room in Claude Code"})`));
+const server = http.createServer(handleRequest);
+
+if (!process.env.VERCEL) {
+  server.listen(PORT, "127.0.0.1", () => console.log(`Roast Room on http://localhost:${PORT} (${RUNNER === "api" ? "viewer + API runner" : "viewer: run /roast-room in Claude Code"})`));
+}
+
+export default handleRequest;

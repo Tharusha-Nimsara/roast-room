@@ -223,5 +223,7 @@ export function listLive() {
 
 export function startWatching() {
   scan();
-  setInterval(scan, 1000);
+  if (!process.env.VERCEL) {
+    setInterval(scan, 1000);
+  }
 }

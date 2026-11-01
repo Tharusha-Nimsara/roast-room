@@ -1,6 +1,8 @@
 .env
 node_modules/
 .DS_Store
+.vercel/
+public/
 
 # /newroaster's raw sources (transcripts, essays, notes) stay on your machine; only the brain ships
 build/
